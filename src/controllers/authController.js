@@ -348,3 +348,91 @@ exports.resetPassword = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to reset password.' });
   }
 };
+
+// 8. Supabase Sync (Google OAuth or Supabase Auth)
+exports.supabaseSync = async (req, res) => {
+  try {
+    const { email, name, avatar, supabaseId } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required from authentication provider.'
+      });
+    }
+
+    const emailClean = email.toLowerCase().trim();
+    const displayName = (name && name.trim()) || emailClean.split('@')[0];
+
+    // Find or create user in MySQL
+    let user = await prisma.user.findUnique({
+      where: { email: emailClean }
+    });
+
+    if (!user) {
+      // Create user
+      const randomPassword = crypto.randomBytes(24).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+      user = await prisma.user.create({
+        data: {
+          name: displayName,
+          email: emailClean,
+          password: hashedPassword,
+          avatar: avatar || null,
+          preference: {
+            create: {
+              emailNotifications: true,
+              inAppNotifications: true,
+              notify30Days: true,
+              notify15Days: true,
+              notify7Days: true,
+              notify3Days: true,
+              notify1Day: true,
+              notifyOnExpiry: true,
+              notifyAfterExpiry: true
+            }
+          }
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          avatar: true,
+          createdAt: true
+        }
+      });
+    } else {
+      // Update avatar or name if provided by Google
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          ...(avatar && { avatar }),
+          ...(name && { name: displayName })
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          avatar: true,
+          createdAt: true
+        }
+      });
+    }
+
+    const token = generateToken(user);
+
+    return res.json({
+      success: true,
+      message: 'Authenticated successfully with Google.',
+      token,
+      user
+    });
+  } catch (error) {
+    console.error('Supabase sync error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to synchronize authentication session.'
+    });
+  }
+};
