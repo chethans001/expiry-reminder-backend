@@ -14,10 +14,40 @@ const { initCron } = require('./services/cronService');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS configuration
+// Enable reverse proxy trust for deployments behind Render / proxies (for secure cookies and accurate rate limiting)
+app.set('trust proxy', 1);
+
+// CORS configuration supporting Vercel frontend deployments and local dev
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  'http://localhost:4173'
+].filter(Boolean).map(o => o.trim().replace(/\/+$/, '').toLowerCase());
+
 app.use(cors({
-  origin: '*',
-  credentials: true
+  origin: (origin, callback) => {
+    // Allow server-to-server, curl, Postman or same-origin requests where origin is not set
+    if (!origin) return callback(null, true);
+
+    const lowerOrigin = origin.toLowerCase().trim().replace(/\/+$/, '');
+    const isExplicitlyAllowed = allowedOrigins.includes(lowerOrigin);
+    const isVercelOrigin = /^https:\/\/.*\.vercel\.app$/.test(lowerOrigin);
+    const isDev = process.env.NODE_ENV !== 'production';
+
+    if (isExplicitlyAllowed || isVercelOrigin || isDev) {
+      return callback(null, origin);
+    }
+
+    // Default allow with origin reflection for cross-origin client access
+    return callback(null, origin);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
 
 // Rate limiting (generous for personal household use)

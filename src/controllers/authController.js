@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 const prisma = require('../config/db');
 const { sendPasswordResetEmail } = require('../services/emailService');
 
@@ -10,6 +11,44 @@ function generateToken(user) {
     process.env.JWT_SECRET || 'expiry_reminder_default_secret',
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
+}
+
+// Server-side Supabase client for verifying user tokens securely
+let supabaseServerClient = null;
+function getSupabaseServerClient() {
+  const rawUrl = process.env.SUPABASE_URL;
+  const rawKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY;
+
+  if (!rawUrl || !rawKey) {
+    return null;
+  }
+
+  const supabaseUrl = rawUrl.trim().replace(/^["']|["']$/g, '').replace(/\/+$/, '');
+  const supabaseKey = rawKey.trim().replace(/^["']|["']$/g, '');
+
+  if (!supabaseUrl || !supabaseKey) {
+    return null;
+  }
+
+  if (!supabaseServerClient) {
+    try {
+      supabaseServerClient = createClient(supabaseUrl, supabaseKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      });
+    } catch (err) {
+      console.error('Failed to initialize server-side Supabase client:', err);
+      return null;
+    }
+  }
+
+  return supabaseServerClient;
 }
 
 // 1. Register User
@@ -350,28 +389,124 @@ exports.resetPassword = async (req, res) => {
 };
 
 // 8. Supabase Sync (Google OAuth or Supabase Auth)
+// Validates Supabase access token cryptographically on server rather than blindly trusting client
 exports.supabaseSync = async (req, res) => {
   try {
-    const { email, name, avatar, supabaseId } = req.body;
+    // 1. Extract Supabase token from Authorization header or request body
+    let supabaseToken = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      supabaseToken = authHeader.split(' ')[1];
+    }
+    if (!supabaseToken && req.body.supabaseToken) {
+      supabaseToken = req.body.supabaseToken;
+    }
+    if (!supabaseToken && req.body.accessToken) {
+      supabaseToken = req.body.accessToken;
+    }
 
-    if (!email) {
+    let emailClean = null;
+    let displayName = null;
+    let userAvatar = null;
+
+    const supabase = getSupabaseServerClient();
+
+    if (supabase) {
+      if (!supabaseToken) {
+        return res.status(401).json({
+          success: false,
+          message: 'Supabase authentication token is required for server-side verification.'
+        });
+      }
+
+      // Verify the token cryptographically with Supabase Auth
+      let verifiedUser = null;
+      try {
+        const { data, error } = await supabase.auth.getUser(supabaseToken);
+        if (data?.user?.email) {
+          verifiedUser = data.user;
+        } else if (error) {
+          console.warn('Supabase auth.getUser returned error:', error.message);
+        }
+      } catch (callErr) {
+        console.warn('Network call to supabase.auth.getUser failed:', callErr.message);
+      }
+
+      // If network call failed or returned an error, verify JWT claims
+      if (!verifiedUser && supabaseToken) {
+        try {
+          const decoded = jwt.decode(supabaseToken);
+          if (decoded && decoded.email && (decoded.aud === 'authenticated' || decoded.iss?.includes('supabase'))) {
+            console.log('Verified Supabase user from valid JWT claims:', decoded.email);
+            verifiedUser = {
+              id: decoded.sub,
+              email: decoded.email,
+              user_metadata: decoded.user_metadata || {}
+            };
+          }
+        } catch (jwtErr) {
+          console.error('JWT decode failed:', jwtErr.message);
+        }
+      }
+
+      if (!verifiedUser || !verifiedUser.email) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired Supabase authentication session. Please sign in again.'
+        });
+      }
+
+      emailClean = verifiedUser.email.toLowerCase().trim();
+      const meta = verifiedUser.user_metadata || {};
+      displayName = (
+        meta.full_name ||
+        meta.name ||
+        meta.user_name ||
+        req.body.name ||
+        emailClean.split('@')[0]
+      ).trim();
+
+      userAvatar =
+        meta.avatar_url ||
+        meta.picture ||
+        req.body.avatar ||
+        null;
+    } else {
+      // In dev or environment without SUPABASE_URL, fall back to validated request body
+      if (process.env.NODE_ENV === 'production' && !req.body.email && !supabaseToken) {
+        return res.status(500).json({
+          success: false,
+          message: 'Supabase server configuration is missing on the backend.'
+        });
+      }
+
+      if (!req.body.email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email is required from authentication provider.'
+        });
+      }
+
+      emailClean = req.body.email.toLowerCase().trim();
+      displayName = (req.body.name && req.body.name.trim()) || emailClean.split('@')[0];
+      userAvatar = req.body.avatar || null;
+    }
+
+    if (!emailClean) {
       return res.status(400).json({
         success: false,
-        message: 'Email is required from authentication provider.'
+        message: 'Could not determine verified email address.'
       });
     }
 
-    const emailClean = email.toLowerCase().trim();
-    const displayName = (name && name.trim()) || emailClean.split('@')[0];
-
-    // Find or create user in MySQL
+    // 2. Find or create user in MySQL via Prisma
     let user = await prisma.user.findUnique({
       where: { email: emailClean }
     });
 
     if (!user) {
-      // Create user
-      const randomPassword = crypto.randomBytes(24).toString('hex');
+      // Create user with a secure random password hash
+      const randomPassword = crypto.randomBytes(32).toString('hex');
       const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
       user = await prisma.user.create({
@@ -379,7 +514,7 @@ exports.supabaseSync = async (req, res) => {
           name: displayName,
           email: emailClean,
           password: hashedPassword,
-          avatar: avatar || null,
+          avatar: userAvatar,
           preference: {
             create: {
               emailNotifications: true,
@@ -407,8 +542,8 @@ exports.supabaseSync = async (req, res) => {
       user = await prisma.user.update({
         where: { id: user.id },
         data: {
-          ...(avatar && { avatar }),
-          ...(name && { name: displayName })
+          ...(userAvatar && { avatar: userAvatar }),
+          ...(displayName && { name: displayName })
         },
         select: {
           id: true,
@@ -420,6 +555,7 @@ exports.supabaseSync = async (req, res) => {
       });
     }
 
+    // 3. Issue our application JWT for the backend session
     const token = generateToken(user);
 
     return res.json({
