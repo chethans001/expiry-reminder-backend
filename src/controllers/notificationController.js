@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const { runExpiryCheck } = require('../services/cronService');
+const { sendTestEmail } = require('../services/emailService');
 
 // 1. Get User Notifications
 exports.getNotifications = async (req, res) => {
@@ -212,5 +213,37 @@ exports.triggerCheck = async (req, res) => {
   } catch (error) {
     console.error('Trigger check error:', error);
     return res.status(500).json({ success: false, message: 'Failed to run check.' });
+  }
+};
+
+// 9. Send Test Email Notification
+exports.sendTestEmail = async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, name: true, email: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const targetEmail = (req.body?.email || user.email || '').trim().toLowerCase();
+    if (!targetEmail) {
+      return res.status(400).json({ success: false, message: 'Please provide an email address.' });
+    }
+
+    const result = await sendTestEmail({ name: user.name, email: targetEmail });
+
+    return res.json({
+      success: true,
+      simulated: Boolean(result?.simulated),
+      message: result?.simulated
+        ? `Test email simulated for ${targetEmail} (SMTP credentials not configured in backend environment).`
+        : `Test email sent successfully to ${targetEmail}!`
+    });
+  } catch (error) {
+    console.error('Send test email error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to send test email.' });
   }
 };

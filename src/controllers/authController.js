@@ -216,14 +216,43 @@ exports.getProfile = async (req, res) => {
 // 4. Update Profile
 exports.updateProfile = async (req, res) => {
   try {
-    const { name, avatar } = req.body;
+    const { name, email, avatar } = req.body;
+    const updateData = {};
+
+    if (name !== undefined && name.trim()) {
+      updateData.name = name.trim();
+    }
+    if (avatar !== undefined) {
+      updateData.avatar = avatar;
+    }
+
+    if (email !== undefined) {
+      const cleanEmail = email.toLowerCase().trim();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please enter a valid email address.'
+        });
+      }
+
+      const existingUser = await prisma.user.findUnique({
+        where: { email: cleanEmail }
+      });
+
+      if (existingUser && existingUser.id !== req.user.id) {
+        return res.status(400).json({
+          success: false,
+          message: 'An account with this email already exists.'
+        });
+      }
+
+      updateData.email = cleanEmail;
+    }
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
-      data: {
-        ...(name && { name: name.trim() }),
-        ...(avatar !== undefined && { avatar })
-      },
+      data: updateData,
       select: {
         id: true,
         name: true,

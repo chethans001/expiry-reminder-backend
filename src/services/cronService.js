@@ -81,7 +81,7 @@ async function runExpiryCheck() {
 
       if (!shouldNotify) continue;
 
-      // Prevent duplicate notification for the same product and daysRemaining within today
+      // Prevent duplicate notification/email for the same product and stage today
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
@@ -94,37 +94,50 @@ async function runExpiryCheck() {
         }
       });
 
-      if (!existingNotif && pref.inAppNotifications) {
-        await prisma.notification.create({
-          data: {
-            userId: user.id,
-            productId: product.id,
-            title,
-            message,
-            type: notificationType,
-            daysRemaining: days,
-            isRead: false
-          }
-        });
+      if (!existingNotif) {
+        const shouldSendEmail = Boolean(pref.emailNotifications && user.email);
 
-        // Add to email batch if email notifications enabled
-        if (pref.emailNotifications && user.email) {
-          if (!userEmailsToBatch.has(user.id)) {
-            userEmailsToBatch.set(user.id, { user, items: [] });
-          }
-          userEmailsToBatch.get(user.id).items.push({
-            ...product,
-            daysRemaining: days,
-            label: expiryInfo.label
+        if (pref.inAppNotifications || shouldSendEmail) {
+          const createdNotif = await prisma.notification.create({
+            data: {
+              userId: user.id,
+              productId: product.id,
+              title,
+              message,
+              type: notificationType,
+              daysRemaining: days,
+              isRead: !pref.inAppNotifications,
+              sentEmail: false
+            }
           });
+
+          // Add to email batch if email notifications enabled
+          if (shouldSendEmail) {
+            if (!userEmailsToBatch.has(user.id)) {
+              userEmailsToBatch.set(user.id, { user, items: [], notificationIds: [] });
+            }
+            const entry = userEmailsToBatch.get(user.id);
+            entry.items.push({
+              ...product,
+              daysRemaining: days,
+              label: expiryInfo.label
+            });
+            entry.notificationIds.push(createdNotif.id);
+          }
         }
       }
     }
 
-    // Send batched email to each user who has alerts
-    for (const [, { user, items }] of userEmailsToBatch) {
+    // Send batched email to each user who has alerts and mark sentEmail = true
+    for (const [, { user, items, notificationIds }] of userEmailsToBatch) {
       if (items.length > 0) {
-        await sendExpiryReminderEmail(user, items);
+        const result = await sendExpiryReminderEmail(user, items);
+        if (result && notificationIds.length > 0) {
+          await prisma.notification.updateMany({
+            where: { id: { in: notificationIds } },
+            data: { sentEmail: true }
+          });
+        }
       }
     }
 

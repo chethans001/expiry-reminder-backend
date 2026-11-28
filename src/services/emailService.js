@@ -4,26 +4,41 @@ let transporter = null;
 
 function getTransporter() {
   if (!transporter) {
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.ethereal.email',
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: process.env.SMTP_PORT === '465',
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS
-        }
-      });
+    const emailUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+    const emailPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+
+    if (emailUser && emailPass) {
+      if (process.env.EMAIL_SERVICE) {
+        transporter = nodemailer.createTransport({
+          service: process.env.EMAIL_SERVICE,
+          auth: {
+            user: emailUser,
+            pass: emailPass
+          }
+        });
+      } else {
+        transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST || 'smtp.gmail.com',
+          port: parseInt(process.env.SMTP_PORT || '587', 10),
+          secure: process.env.SMTP_PORT === '465',
+          auth: {
+            user: emailUser,
+            pass: emailPass
+          }
+        });
+      }
+      transporter._isSimulated = false;
     } else {
-      // In development without credentials, create a stream or ethereal transporter
+      // In development without credentials, create a simulated transporter
       transporter = {
+        _isSimulated: true,
         sendMail: async (mailOptions) => {
           console.log('--- [EMAIL DISPATCH - DEV SIMULATION] ---');
           console.log(`To: ${mailOptions.to}`);
           console.log(`Subject: ${mailOptions.subject}`);
           console.log(`Preview: ${mailOptions.text || mailOptions.html.substring(0, 150)}...`);
           console.log('-----------------------------------------');
-          return { messageId: 'simulated-' + Date.now() };
+          return { messageId: 'simulated-' + Date.now(), simulated: true };
         }
       };
     }
@@ -31,18 +46,49 @@ function getTransporter() {
   return transporter;
 }
 
+function getFromAddress() {
+  return process.env.SMTP_FROM || process.env.EMAIL_FROM || '"Expiry Reminder" <reminders@expiryreminder.app>';
+}
+
+function formatExpiryDate(dateVal) {
+  if (!dateVal) return 'N/A';
+  const d = new Date(dateVal);
+  if (isNaN(d.getTime())) return 'N/A';
+  return d.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+function formatRemainingDays(days) {
+  if (days === 0) return 'Expires Today (0 days left)';
+  if (days === 1) return '1 day remaining';
+  if (days > 1) return `${days} days remaining`;
+  const ago = Math.abs(days);
+  return `Expired ${ago} day${ago === 1 ? '' : 's'} ago`;
+}
+
 async function sendExpiryReminderEmail(user, items) {
   try {
     const t = getTransporter();
     const itemsListHtml = items.map(item => `
-      <li style="margin-bottom: 8px;">
-        <strong>${item.name}</strong> (${item.category?.name || 'General'}) - 
-        <span style="color: ${item.daysRemaining <= 0 ? '#e11d48' : '#d97706'}; font-weight: bold;">
-          ${item.label}
-        </span>
-        <br/><small style="color: #64748b;">Location: ${item.storageLocation || 'Kitchen'}</small>
+      <li style="margin-bottom: 12px; padding: 10px 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid ${item.daysRemaining <= 1 ? '#e11d48' : '#f59e0b'};">
+        <div style="font-size: 15px; font-weight: bold; color: #0f172a;">${item.name}</div>
+        <div style="font-size: 13px; color: #475569; margin-top: 4px;">
+          <strong>Category:</strong> ${item.category?.name || 'Other'} &nbsp;|&nbsp;
+          <strong>Where to Store:</strong> ${item.storageLocation || 'Other'}
+        </div>
+        <div style="font-size: 13px; color: #475569; margin-top: 2px;">
+          <strong>Expiry Date:</strong> ${formatExpiryDate(item.expiryDate)} &nbsp;|&nbsp;
+          <strong style="color: ${item.daysRemaining <= 0 ? '#e11d48' : '#d97706'};">Remaining:</strong> ${formatRemainingDays(item.daysRemaining)}
+        </div>
       </li>
     `).join('');
+
+    const itemsListText = items.map(item =>
+      `- ${item.name} | Category: ${item.category?.name || 'Other'} | Expiry Date: ${formatExpiryDate(item.expiryDate)} | ${formatRemainingDays(item.daysRemaining)} | Where to Store: ${item.storageLocation || 'Other'}`
+    ).join('\n');
 
     const html = `
       <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px; border: 1px solid #e2e8f0;">
@@ -51,9 +97,9 @@ async function sendExpiryReminderEmail(user, items) {
           <p style="margin: 4px 0 0 0; opacity: 0.9;">Your Household Expiry Alerts</p>
         </div>
         <div style="background: white; padding: 24px; border-radius: 8px; margin-top: 16px;">
-          <p style="font-size: 16px; color: #1e293b;">Hello ${user.name},</p>
+          <p style="font-size: 16px; color: #1e293b;">Hello ${user.name || 'there'},</p>
           <p style="color: #475569;">Here is your personal expiry update for upcoming or expired household items:</p>
-          <ul style="padding-left: 20px; color: #334155;">
+          <ul style="list-style: none; padding-left: 0; color: #334155;">
             ${itemsListHtml}
           </ul>
           <div style="text-align: center; margin-top: 24px;">
@@ -69,16 +115,47 @@ async function sendExpiryReminderEmail(user, items) {
     `;
 
     return await t.sendMail({
-      from: process.env.SMTP_FROM || '"Expiry Reminder" <reminders@expiryreminder.app>',
+      from: getFromAddress(),
       to: user.email,
       subject: `⏰ Expiry Reminder: ${items.length} item(s) need your attention`,
       html,
-      text: `Hello ${user.name},\nYou have ${items.length} items expiring or expired. Please check your dashboard: ${process.env.CLIENT_URL || 'http://localhost:5173'}`
+      text: `Hello ${user.name || 'there'},\n\nHere are your upcoming expiry alerts:\n${itemsListText}\n\nCheck your dashboard: ${process.env.CLIENT_URL || 'http://localhost:5173'}/dashboard`
     });
   } catch (error) {
     console.error('Error sending reminder email:', error);
     return null;
   }
+}
+
+async function sendTestEmail(user) {
+  const t = getTransporter();
+  const html = `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px; border: 1px solid #e2e8f0;">
+      <div style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); padding: 20px; border-radius: 8px; text-align: center; color: white;">
+        <h1 style="margin: 0; font-size: 24px;">Test Email Successful</h1>
+        <p style="margin: 4px 0 0 0; opacity: 0.9;">Expiry Reminder Notification Check</p>
+      </div>
+      <div style="background: white; padding: 24px; border-radius: 8px; margin-top: 16px;">
+        <p style="font-size: 16px; color: #1e293b;">Hello ${user.name || 'there'},</p>
+        <p style="color: #475569;">This is a test email from <strong>Expiry Reminder</strong>.</p>
+        <p style="color: #475569;">Your email notifications are configured to send alerts to <strong>${user.email}</strong> at 7 days, 3 days, 1 day before expiry, and on the expiry date.</p>
+      </div>
+    </div>
+  `;
+
+  const info = await t.sendMail({
+    from: getFromAddress(),
+    to: user.email,
+    subject: '✅ Test Email - Expiry Reminder Notifications',
+    html,
+    text: `Hello ${user.name || 'there'},\nThis is a test email from Expiry Reminder. Alerts will be sent to ${user.email}.`
+  });
+
+  return {
+    success: true,
+    simulated: Boolean(t._isSimulated || info?.simulated),
+    messageId: info?.messageId
+  };
 }
 
 async function sendPasswordResetEmail(user, resetToken) {
@@ -106,7 +183,7 @@ async function sendPasswordResetEmail(user, resetToken) {
     `;
 
     return await t.sendMail({
-      from: process.env.SMTP_FROM || '"Expiry Reminder" <reminders@expiryreminder.app>',
+      from: getFromAddress(),
       to: user.email,
       subject: '🔑 Password Reset Request - Expiry Reminder',
       html,
@@ -120,5 +197,6 @@ async function sendPasswordResetEmail(user, resetToken) {
 
 module.exports = {
   sendExpiryReminderEmail,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  sendTestEmail
 };

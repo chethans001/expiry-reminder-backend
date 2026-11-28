@@ -13,5 +13,6 @@ router.delete('/:id', notificationController.deleteNotification);
 router.get('/preferences', notificationController.getPreferences);
 router.put('/preferences', notificationController.updatePreferences);
 router.post('/trigger-check', notificationController.triggerCheck);
+router.post('/test-email', notificationController.sendTestEmail);
 
 module.exports = router;
