@@ -2,15 +2,22 @@ const nodemailer = require('nodemailer');
 
 let transporter = null;
 
+function cleanEnv(val) {
+  if (!val || typeof val !== 'string') return '';
+  return val.trim().replace(/^["']|["']$/g, '').trim();
+}
+
 function getTransporter() {
   if (!transporter) {
-    const emailUser = process.env.SMTP_USER || process.env.EMAIL_USER;
-    const emailPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+    const emailUser = cleanEnv(process.env.SMTP_USER || process.env.EMAIL_USER);
+    const emailPass = cleanEnv(process.env.SMTP_PASS || process.env.EMAIL_PASS);
+    const emailService = cleanEnv(process.env.EMAIL_SERVICE);
+    const smtpHost = cleanEnv(process.env.SMTP_HOST);
 
     if (emailUser && emailPass) {
-      if (process.env.EMAIL_SERVICE) {
+      if (emailService) {
         transporter = nodemailer.createTransport({
-          service: process.env.EMAIL_SERVICE,
+          service: emailService,
           auth: {
             user: emailUser,
             pass: emailPass
@@ -18,9 +25,9 @@ function getTransporter() {
         });
       } else {
         transporter = nodemailer.createTransport({
-          host: process.env.SMTP_HOST || 'smtp.gmail.com',
-          port: parseInt(process.env.SMTP_PORT || '587', 10),
-          secure: process.env.SMTP_PORT === '465',
+          host: smtpHost || 'smtp.gmail.com',
+          port: parseInt(cleanEnv(process.env.SMTP_PORT) || '587', 10),
+          secure: cleanEnv(process.env.SMTP_PORT) === '465',
           auth: {
             user: emailUser,
             pass: emailPass
@@ -36,7 +43,6 @@ function getTransporter() {
           console.log('--- [EMAIL DISPATCH - DEV SIMULATION] ---');
           console.log(`To: ${mailOptions.to}`);
           console.log(`Subject: ${mailOptions.subject}`);
-          console.log(`Preview: ${mailOptions.text || mailOptions.html.substring(0, 150)}...`);
           console.log('-----------------------------------------');
           return { messageId: 'simulated-' + Date.now(), simulated: true };
         }
@@ -161,7 +167,8 @@ async function sendTestEmail(user) {
 async function sendPasswordResetEmail(user, resetToken) {
   try {
     const t = getTransporter();
-    const resetUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
+    const clientUrl = (cleanEnv(process.env.CLIENT_URL) || 'http://localhost:5173').replace(/\/+$/, '');
+    const resetUrl = `${clientUrl}/reset-password?token=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(user.email)}`;
 
     const html = `
       <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px; border: 1px solid #e2e8f0;">

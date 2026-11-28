@@ -1,6 +1,11 @@
 const jwt = require('jsonwebtoken');
 const prisma = require('../config/db');
 
+function getJwtSecret() {
+  const raw = process.env.JWT_SECRET || 'expiry_reminder_default_secret';
+  return raw.trim().replace(/^["']|["']$/g, '');
+}
+
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -11,8 +16,15 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'expiry_reminder_default_secret');
+    const token = authHeader.split(' ')[1]?.trim();
+    if (!token || token === 'null' || token === 'undefined') {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication token is missing. Please log in.'
+      });
+    }
+
+    const decoded = jwt.verify(token, getJwtSecret());
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },

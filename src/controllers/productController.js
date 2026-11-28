@@ -237,8 +237,10 @@ exports.updateItem = async (req, res) => {
     let imageUrl = existing.imageUrl;
     if (req.file) {
       imageUrl = `/uploads/${req.file.filename}`;
+    } else if (req.body.removeImage === 'true' || req.body.removeImage === true) {
+      imageUrl = null;
     } else if (req.body.imageUrl !== undefined) {
-      imageUrl = req.body.imageUrl;
+      imageUrl = req.body.imageUrl || null;
     }
 
     const updated = await prisma.product.update({
